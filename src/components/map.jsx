@@ -6,108 +6,125 @@ export default function Map() {
     const mapContainer = useRef(null);
 
     useEffect(() => {
-        const map = new maplibregl.Map({
-            container: mapContainer.current,
-            style: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-            center: [-106.4850, 31.7619], // El Paso
-            zoom: 11,
-        });
+    const map = new maplibregl.Map({
+        container: mapContainer.current,
+        style: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        center: [-106.4850, 31.7619],
+        zoom: 11,
+    });
 
-        map.addControl(new maplibregl.NavigationControl(), "top-right");
-        map.on("load", async () => {
-            fetch("/data/zoning.geojson")
-                .then(res => res.json())
-                .then(data => {
-                    const commercial = data.features.filter(
-                        f => f.properties.ZONE_?.startsWith("C")
-                    );
+    function scoreSite(area) {
+        const tjIdeal = 0.000003;
+        const tjTolerance = 0.000002;
+        const hebMax = 0.000006;
 
-                    const areas = commercial
-                        .map(f => f.properties.Shape_Area)
-                        .sort((a, b) => a - b);
+        const tjRaw = Math.exp(-Math.pow(area - tjIdeal, 2) / (2 * Math.pow(tjTolerance, 2)));
+        const hebRaw = Math.min(area / hebMax, 1);
 
-                    console.log("Commercial zone count:", areas.length);
-                    console.log("Min area:", areas[0]);
-                    console.log("Median area:", areas[Math.floor(areas.length / 2)]);
-                    console.log("90th percentile:", areas[Math.floor(areas.length * 0.9)]);
-                    console.log("Max area:", areas[areas.length - 1]);
-                });
-            // Add zoning source
-            map.addSource("zoning", {
-                type: "geojson",
-                data: "/data/zoning.geojson",
-            });
-            map.addLayer({
-                id: "zoning-medium-commercial",
-                type: "fill",
-                source: "zoning",
-                paint: {
-                    "fill-color": "#F9A825",
-                    "fill-opacity": 0.55
-                },
-                filter: [
-                    "all",
-                    ["==", ["slice", ["get", "ZONE_"], 0, 1], "C"],
-                    [">", ["get", "Shape_Area"], 0.000001],
-                    ["<=", ["get", "Shape_Area"], 0.000006]
-                ]
-            });
-
-            map.addLayer({
-                id: "zoning-large-commercial",
-                type: "fill",
-                source: "zoning",
-                paint: {
-                    "fill-color": "#5e1b1bff",
-                    "fill-opacity": 0.6
-                },
-                filter: [
-                    "all",
-                    ["==", ["slice", ["get", "ZONE_"], 0, 1], "C"],
-                    [">", ["get", "Shape_Area"], 0.000006]
-                ]
-            });
-
-            map.addLayer({
-                id: "zoning-outline",
-                type: "line",
-                source: "zoning",
-                paint: {
-                    "line-color": "#1B5E20",
-                    "line-width": 1
-                }
-            });
-            map.on("click", "zoning-large-commercial", (e) => {
-                const p = e.features[0].properties;
-
-                new maplibregl.Popup()
-                    .setLngLat(e.lngLat)
-                    .setHTML(`
-      <strong>Zone:</strong> ${p.ZONE_}<br/>
-      <strong>Scale:</strong> Big-box commercial<br/>
-      <strong>Best fit:</strong> H-E-B<br/>
-      <strong>Area:</strong> ${(p.Shape_Area * 404686).toFixed(1)} acres
-    `)
-                    .addTo(map);
-            });
-            map.on("click", "zoning-medium-commercial", (e) => {
-                const p = e.features[0].properties;
-
-                new maplibregl.Popup()
-                    .setLngLat(e.lngLat)
-                    .setHTML(`
-      <strong>Zone:</strong> ${p.ZONE_}<br/>
-      <strong>Scale:</strong> Big-box commercial<br/>
-      <strong>Best fit:</strong> Trader Joe's<br/>
-      <strong>Area:</strong> ${(p.Shape_Area * 404686).toFixed(1)} acres
-    `)
-                    .addTo(map);
-            });
-
-        });
-        return () => map.remove();
+        return {
+            tj: Math.round(tjRaw * 100),
+            heb: Math.round(Math.pow(hebRaw, 1.4) * 100),
+        };
     }
-        , []);
+
+    map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+    map.on("load", async () => {
+        // --- Zoning outline layer first ---
+        map.addSource("zoning", {
+            type: "geojson",
+            data: "/data/zoning.geojson",
+        });
+        map.addLayer({
+            id: "zoning-outline",
+            type: "line",
+            source: "zoning",
+            paint: {
+                "line-color": "#1B5E20",
+                "line-width": 1
+            }
+        });
+
+        // --- Fetch, score, and add points ---
+        const res = await fetch("/data/zoning.geojson");
+        const data = await res.json();
+
+        const features = data.features.filter(f =>
+            f.properties.ZONE_?.startsWith("C") &&
+            f.properties.Shape_Area > 0.000001
+        );
+
+        const siteFeatures = features.map(f => {
+            const coords = f.geometry.coordinates.flat(2);
+            let x = 0, y = 0;
+            coords.forEach(c => { x += c[0]; y += c[1]; });
+            const centroid = [x / coords.length, y / coords.length];
+            const scores = scoreSite(f.properties.Shape_Area);
+
+            return {
+                type: "Feature",
+                properties: {
+                    zone: f.properties.ZONE_,
+                    area: f.properties.Shape_Area,
+                    tj_score: scores.tj,
+                    heb_score: scores.heb,
+                    winner: scores.heb > scores.tj ? "heb" : "tj"
+                },
+                geometry: {
+                    type: "Point",
+                    coordinates: centroid
+                }
+            };
+        });
+
+        map.addSource("ranked-sites", {
+            type: "geojson",
+            data: { type: "FeatureCollection", features: siteFeatures }
+        });
+
+        map.addLayer({
+            id: "ranked-sites-layer",
+            type: "circle",
+            source: "ranked-sites",
+            paint: {
+                "circle-radius": [
+                    "interpolate",
+                    ["linear"],
+                    ["zoom"],
+                    10, 4,
+                    13, 8,
+                    16, 16
+                ],
+                "circle-color": [
+                    "match",
+                    ["get", "winner"],
+                    "heb", "#C62828",
+                    "tj", "#F9A825",
+                    "#999999"
+                ],
+                "circle-opacity": 0.85,
+                "circle-stroke-width": 1,
+                "circle-stroke-color": "#333"
+            }
+        });
+
+        map.on("click", "ranked-sites-layer", (e) => {
+            const p = e.features[0].properties;
+            new maplibregl.Popup()
+                .setLngLat(e.lngLat)
+                .setHTML(`
+                    <strong>Commercial Zone:</strong> ${p.zone}<br/>
+                    <strong>Trader Joe’s Score:</strong> ${p.tj_score}<br/>
+                    <strong>H-E-B Score:</strong> ${p.heb_score}<br/>
+                    <strong>Relative Size:</strong> ${(p.area * 404686).toFixed(1)} acres
+                `)
+                .addTo(map);
+        });
+    });
+
+    return () => map.remove();
+}, []);
+
 
     return (
         <>
