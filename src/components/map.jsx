@@ -12,8 +12,9 @@ export default function Map() {
             center: [-106.4850, 31.7619],
             zoom: 11,
         });
+        function scoreSite(area, density = 0) {
+            if (!area || area <= 0) return { tj: 0, heb: 0 };
 
-        function scoreSite(area, density) {
             const tjIdeal = 0.000003;
             const tjTolerance = 0.000002;
             const hebMax = 0.000006;
@@ -24,9 +25,8 @@ export default function Map() {
 
             const hebSize = Math.min(area / hebMax, 1);
 
-            // Density influence
-            const tjDensity = Math.min(density / 6000, 1);   // TJ likes density
-            const hebDensity = Math.min(density / 12000, 1); // HEB broader catchment
+            const tjDensity = Math.min(density / 6000, 1);
+            const hebDensity = Math.min(density / 12000, 1);
 
             return {
                 tj: Math.round((tjSize * 0.6 + tjDensity * 0.4) * 100),
@@ -47,18 +47,6 @@ export default function Map() {
                 data: "/data/el_paso_tracts_with_density.geojson"
             });
             map.addLayer({
-                id: "zoning-outline",
-                type: "line",
-                source: "zoning",
-                paint: {
-                    "line-color": "#1B5E20",
-                    "line-width": 1
-                }
-            });
-
-
-
-            map.addLayer({
                 id: "population-density",
                 type: "fill",
                 source: "population",
@@ -72,11 +60,28 @@ export default function Map() {
                         5000, "#FBC02D",
                         10000, "#F57F17"
                     ],
-                    "fill-opacity": 0.4
+                    "fill-opacity": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        10, 0.15,
+                        13, 0.45
+                    ]
                 }
-            }, "zoning-outline");
+            });
+
+            map.addLayer({
+                id: "zoning-outline",
+                type: "line",
+                source: "zoning",
+                paint: {
+                    "line-color": "#1B5E20",
+                    "line-width": 1
+                }
+            });
+
             // --- Fetch, score, and add points ---
-            const res = await fetch("/data/zoning.geojson");
+            const res = await fetch("/data/zoning_with_density.geojson");
             const data = await res.json();
 
             const features = data.features.filter(f =>
@@ -89,7 +94,11 @@ export default function Map() {
                 let x = 0, y = 0;
                 coords.forEach(c => { x += c[0]; y += c[1]; });
                 const centroid = [x / coords.length, y / coords.length];
-                const scores = scoreSite(f.properties.Shape_Area, 0);
+                const density = Number(f.properties.pop_density) || 0;
+                const scores = scoreSite(
+                    f.properties.Shape_Area,
+                    density
+                );
                 const margin = Math.abs(scores.heb - scores.tj);
 
                 return {
@@ -160,6 +169,10 @@ export default function Map() {
                 `)
                     .addTo(map);
             });
+            map.on("click", "population-density", (e) => {
+                console.log(e.features[0].properties.pop_density);
+            });
+
         });
 
         return () => map.remove();
