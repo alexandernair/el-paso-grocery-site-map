@@ -201,8 +201,6 @@ export default function Map() {
                 fontSize: "12px",
                 boxShadow: "0 1px 4px rgba(0,0,0,0.3)"
             }}>
-                <div><span style={{ color: "#5e1b1bff" }}>■</span> Large Commercial (H-E-B)</div>
-                <div><span style={{ color: "#F9A825" }}>■</span> Medium Commercial (Trader Joe’s)</div>
             </div>
         </>
     );
